@@ -7,13 +7,14 @@ import math
 
 # hyperparameters
 device = "cuda" if torch.cuda.is_available() else "cpu"
-emb_size = 128
-batch_size = 16
-block_size = 8
-num_head = 2
+emb_size = 512 
+batch_size = 32
+block_size = 16
+num_head = 8
 seed = 42
-decoder_layer = 3
-lr = 1e-3
+decoder_layer = 6
+lr = 3e-4
+dropout_ratio = 0.0
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
 def build_vocab(text):
@@ -35,6 +36,8 @@ class MultiHeadAttention(torch.nn.Module):
         self.v_head = nn.Linear(emb_size, emb_size)
         self.register_buffer('mask', mask)
         self.proj = torch.nn.Linear(num_head * head_size, emb_size)
+        self.attn_dropout = nn.Dropout(dropout_ratio)
+        self.proj_dropout = nn.Dropout(dropout_ratio)
     
     def forward(self, x):
         B, S, C = x.shape
@@ -43,9 +46,9 @@ class MultiHeadAttention(torch.nn.Module):
         v = self.v_head(x).view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
 
         self.attention = F.softmax(q @ k.transpose(-2,-1) / math.sqrt(C // num_head) + self.mask, dim=-1) # B, N, S, S
-        dot_product = self.attention @ v # B, N, S, H
+        dot_product = self.attn_dropout(self.attention) @ v # B, N, S, H
         dot_product = dot_product.transpose(-2,-3).reshape(B, S, -1) # B, S, N * H
-        return self.proj(dot_product)
+        return self.proj_dropout(self.proj(dot_product))
 
 
 class DecoderBlock(torch.nn.Module):
@@ -56,6 +59,7 @@ class DecoderBlock(torch.nn.Module):
             nn.Linear(emb_size, 4 * emb_size),
             nn.ReLU(),
             nn.Linear(4 * emb_size, emb_size),
+            nn.Dropout(dropout_ratio)
         )
         self.ln1 = nn.LayerNorm(emb_size)
         self.ln2 = nn.LayerNorm(emb_size)
@@ -71,15 +75,17 @@ class NanoGPT(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, emb_size)
-        # self.decoder_block = [DecoderBlock() for i in range(decoder_layer)]
-        self.decoder = DecoderBlock()
+        self.decoder_block = nn.ModuleList(
+            DecoderBlock() for i in range(decoder_layer)
+        )
+        # self.decoder = DecoderBlock()
         self.lm_head = nn.Linear(emb_size, vocab_size)
 
     def forward(self, input, target):
         state = self.token_embedding_table(input) # BATCH x SEQ_LEN x EMB_SIZE
-        state = self.decoder(state)
-        # for i in range(decoder_layer):
-        #     state = self.decoder_block[i](state)
+        # state = self.decoder(state)
+        for i in range(decoder_layer):
+            state = self.decoder_block[i](state)
         logits = self.lm_head(state) # BATCH x SEQ_LEN x VOCAB_SIZE
 
         if target is None:
@@ -131,9 +137,16 @@ for i in range(10000):
     loss.backward()
     optimizer.step()
     if i % 100 == 0:
-        print(f"step {i}, loss {cum_loss / 100: .4f}")
-        cum_loss = 0
+        model.eval()
+        with torch.no_grad():
+            xb, yb = get_batch(text_indices, 'test')
+            _, loss = model(xb, yb)
 
+        print(f"step {i}, train loss {cum_loss / 100: .4f}, eval loss {loss: .4f}")
+        cum_loss = 0
+        model.train()
+
+model.eval()
 outputs = model.generate(torch.ones((batch_size, block_size), dtype=torch.long).to(device), max_new_tokens=100)
 
 for output in outputs:
