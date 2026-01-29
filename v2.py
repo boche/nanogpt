@@ -1,0 +1,140 @@
+import urllib.request
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+
+# hyperparameters
+device = "cuda" if torch.cuda.is_available() else "cpu"
+emb_size = 128
+batch_size = 16
+block_size = 8
+num_head = 2
+seed = 42
+decoder_layer = 3
+lr = 1e-3
+url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+
+def build_vocab(text):
+    chars = sorted(list(set(text)))
+    ch2i = {ch: i for i, ch in enumerate(chars)}
+    i2ch = {i: ch for i, ch in enumerate(chars)}
+    encode = lambda s: [ch2i[c] for c in s]
+    decode = lambda s: "".join(i2ch[i] for i in s)
+    return chars, encode, decode
+
+class MultiHeadAttention(torch.nn.Module):
+    def __init__(self, num_head, emb_size, head_size):
+        super().__init__()
+        mask = torch.zeros(block_size, block_size).masked_fill(
+            torch.tril(torch.ones(block_size, block_size)) == 0, float('-inf')
+        )
+        self.q_head = nn.Linear(emb_size, emb_size)
+        self.k_head = nn.Linear(emb_size, emb_size)
+        self.v_head = nn.Linear(emb_size, emb_size)
+        self.register_buffer('mask', mask)
+        self.proj = torch.nn.Linear(num_head * head_size, emb_size)
+    
+    def forward(self, x):
+        B, S, C = x.shape
+        q = self.q_head(x).view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
+        k = self.k_head(x).view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
+        v = self.v_head(x).view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
+
+        self.attention = F.softmax(q @ k.transpose(-2,-1) / math.sqrt(C // num_head) + self.mask, dim=-1) # B, N, S, S
+        dot_product = self.attention @ v # B, N, S, H
+        dot_product = dot_product.transpose(-2,-3).reshape(B, S, -1) # B, S, N * H
+        return self.proj(dot_product)
+
+
+class DecoderBlock(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.MHA = MultiHeadAttention(num_head, emb_size, emb_size // num_head)
+        self.proj = nn.Sequential(
+            nn.Linear(emb_size, 4 * emb_size),
+            nn.ReLU(),
+            nn.Linear(4 * emb_size, emb_size),
+        )
+        self.ln1 = nn.LayerNorm(emb_size)
+        self.ln2 = nn.LayerNorm(emb_size)
+        
+
+    def forward(self, x):
+        # X: B, S, C
+        x = x + self.MHA(self.ln1(x))
+        return x + self.proj(self.ln2(x))
+    
+
+class NanoGPT(nn.Module):
+    def __init__(self, vocab_size):
+        super().__init__()
+        self.token_embedding_table = nn.Embedding(vocab_size, emb_size)
+        # self.decoder_block = [DecoderBlock() for i in range(decoder_layer)]
+        self.decoder = DecoderBlock()
+        self.lm_head = nn.Linear(emb_size, vocab_size)
+
+    def forward(self, input, target):
+        state = self.token_embedding_table(input) # BATCH x SEQ_LEN x EMB_SIZE
+        state = self.decoder(state)
+        # for i in range(decoder_layer):
+        #     state = self.decoder_block[i](state)
+        logits = self.lm_head(state) # BATCH x SEQ_LEN x VOCAB_SIZE
+
+        if target is None:
+            return logits, None
+        else:
+            B, S, C = logits.shape
+            loss = F.cross_entropy(logits.view(B*S, C), target.view(-1))
+            return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens):
+        for i in range(max_new_tokens):
+            logits, _ = self(idx[:, -block_size:], None)
+            logits = logits[:, -1, :] # BATCH x VOCAB_SIZE
+            probs = F.softmax(logits, dim=-1) # BATCH x VOCAB_SIZE
+            token = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, token), dim=1) # append to sequence
+        return idx
+
+def get_batch(text, split):
+    train, val = text[:int(0.9*len(text))], text[int(0.9*len(text)):]
+    data = train if split == 'train' else val
+
+    ix = torch.randint(len(data) - block_size - 1, (batch_size,))
+    xb = torch.stack([data[i:i+block_size] for i in ix])
+    yb = torch.stack([data[i+1:i+1+block_size] for i in ix]) # b * seq_len
+
+    return xb, yb
+
+with urllib.request.urlopen(url) as response:
+    text = response.read().decode("utf-8")
+
+chars, encode, decode = build_vocab(text)
+vocab_size = len(chars)
+text_indices = torch.tensor(encode(text), dtype=torch.long).to(device) 
+torch.manual_seed(seed)
+
+model=NanoGPT(vocab_size).to(device)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+cum_loss = 0
+for i in range(10000):
+    xb, yb = get_batch(text_indices, 'train')
+    logits, loss = model(xb, yb)
+    cum_loss += loss.item()
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    if i % 100 == 0:
+        print(f"step {i}, loss {cum_loss / 100: .4f}")
+        cum_loss = 0
+
+outputs = model.generate(torch.ones((batch_size, block_size), dtype=torch.long).to(device), max_new_tokens=100)
+
+for output in outputs:
+    print(decode(output.view(-1).tolist()))
