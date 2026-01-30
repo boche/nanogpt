@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import time
 
 
 # hyperparameters
@@ -137,7 +138,9 @@ vocab_size = len(chars)
 text_indices = torch.tensor(encode(text), dtype=torch.long).to(device) 
 torch.manual_seed(seed)
 
-model=NanoGPT(vocab_size).to(device)
+model = NanoGPT(vocab_size).to(device)
+torch.set_float32_matmul_precision('high')
+# model = torch.compile(model)
 
 # TODO: print model parameters size
 # TODO: use gradient clipping to stablize model, how to simulate gradient instability
@@ -147,8 +150,15 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 # TODO: add monitoring for maxmimal gpu memory used
 # TODO: try low precision representation
 # TODO: try torch.compile
+
+torch.cuda.reset_peak_memory_stats(device)
+t0 = time.time()
+
 cum_loss = 0
-for i in range(10000):
+num_eval_per_print = 100
+num_train_per_print = 500
+
+for i in range(2000):
     xb, yb = get_batch(text_indices, 'train')
     logits, loss = model(xb, yb)
     cum_loss += loss.item()
@@ -156,19 +166,27 @@ for i in range(10000):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    if i % 100 == 0:
+    if i % num_train_per_print == 0:
         model.eval()
-        # TODO: add more samples to eval loss
         with torch.no_grad():
-            xb, yb = get_batch(text_indices, 'test')
-            _, loss = model(xb, yb)
+            eval_loss = 0
+            num_eval = 100
+            for j in range(num_train_per_print):
+                xb, yb = get_batch(text_indices, 'test')
+                _, loss = model(xb, yb)
+                eval_loss += loss
 
-        print(f"step {i}, train loss {cum_loss / 100: .4f}, eval loss {loss: .4f}")
+        print(f"step {i}, train loss {cum_loss / num_train_per_print: .4f}, eval loss {eval_loss/num_train_per_print: .4f}, time: {time.time() - t0: .2f} seconds")
         cum_loss = 0
         model.train()
 
 model.eval()
 outputs = model.generate(torch.ones((batch_size, block_size), dtype=torch.long).to(device), max_new_tokens=100)
 
-for output in outputs:
-    print(decode(output.view(-1).tolist()))
+# for output in outputs:
+#     print(decode(output.view(-1).tolist()))
+
+torch.cuda.synchronize(device)
+print('-'*80)
+print(int(torch.cuda.max_memory_allocated(device)/1024**2), "MiB")
+print('Time consumed: %.2f seconds' % (time.time() - t0))
