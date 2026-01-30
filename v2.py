@@ -8,14 +8,18 @@ import time
 
 # hyperparameters
 device = "cuda" if torch.cuda.is_available() else "cpu"
-emb_size = 512 
-batch_size = 32
-block_size = 16
-num_head = 8
 seed = 42
+emb_size = 512 
+batch_size = 64
+block_size = 128
+num_head = 8
 decoder_layer = 6
 lr = 3e-4
-dropout_ratio = 0.0
+dropout_ratio = 0.2
+eval_interval = 500
+train_iter = 5000
+eval_iter = 100
+use_flash_attn = True
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
 def build_vocab(text):
@@ -33,10 +37,7 @@ class MultiHeadAttention(torch.nn.Module):
         mask = torch.zeros(block_size, block_size).masked_fill(
             torch.tril(torch.ones(block_size, block_size)) == 0, float('-inf')
         )
-        # TODO: merge q, k, v linear
-        self.q_head = nn.Linear(emb_size, emb_size)
-        self.k_head = nn.Linear(emb_size, emb_size)
-        self.v_head = nn.Linear(emb_size, emb_size)
+        self.qkv_head = nn.Linear(emb_size, emb_size * 3)
         self.register_buffer('mask', mask)
         self.proj = torch.nn.Linear(num_head * head_size, emb_size)
         # Question: can dropout with same ratio be merged? does it affect gradient when merging
@@ -45,16 +46,20 @@ class MultiHeadAttention(torch.nn.Module):
     
     def forward(self, x):
         B, S, C = x.shape
-        q = self.q_head(x).view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
-        k = self.k_head(x).view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
-        v = self.v_head(x).view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
+        qkv = self.qkv_head(x) # B, S, 3C
+        q = qkv[:,:, :C].view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
+        k = qkv[:,:, C:2*C].view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
+        v = qkv[:,:, 2*C:3*C].view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
         # TODO: add positional encoding
 
-        # TODO: verify the mask is working as expected
-        # TODO: flash attention
-        # TODO: Don't store self attention because it's expensive
-        self.attention = F.softmax(q @ k.transpose(-2,-1) / math.sqrt(C // num_head) + self.mask, dim=-1) # B, N, S, S
-        dot_product = self.attn_dropout(self.attention) @ v # B, N, S, H
+        if use_flash_attn:
+            # TODO: implement flash attention with Triton
+            dot_product = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_ratio if self.training else 0, is_causal=True)
+        else:
+            # TODO: Don't store self attention because it's expensive
+            # TODO: verify the mask is working as expected
+            self.attention = F.softmax(q @ k.transpose(-2,-1) / math.sqrt(C // num_head) + self.mask, dim=-1) # B, N, S, S
+            dot_product = self.attn_dropout(self.attention) @ v # B, N, S, H
         dot_product = dot_product.transpose(-2,-3).reshape(B, S, -1) # B, S, N * H
         # Question: add a non-linear layer between attn and final projection
         return self.proj_dropout(self.proj(dot_product))
@@ -140,7 +145,7 @@ torch.manual_seed(seed)
 
 model = NanoGPT(vocab_size).to(device)
 torch.set_float32_matmul_precision('high')
-# model = torch.compile(model)
+model = torch.compile(model)
 
 # TODO: print model parameters size
 # TODO: use gradient clipping to stablize model, how to simulate gradient instability
@@ -155,10 +160,8 @@ torch.cuda.reset_peak_memory_stats(device)
 t0 = time.time()
 
 cum_loss = 0
-num_eval_per_print = 100
-num_train_per_print = 500
 
-for i in range(2000):
+for i in range(train_iter):
     xb, yb = get_batch(text_indices, 'train')
     logits, loss = model(xb, yb)
     cum_loss += loss.item()
@@ -166,17 +169,16 @@ for i in range(2000):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    if i % num_train_per_print == 0:
+    if i % eval_interval == 0:
         model.eval()
         with torch.no_grad():
             eval_loss = 0
-            num_eval = 100
-            for j in range(num_train_per_print):
+            for j in range(eval_iter):
                 xb, yb = get_batch(text_indices, 'test')
                 _, loss = model(xb, yb)
                 eval_loss += loss
 
-        print(f"step {i}, train loss {cum_loss / num_train_per_print: .4f}, eval loss {eval_loss/num_train_per_print: .4f}, time: {time.time() - t0: .2f} seconds")
+        print(f"step {i}, train loss {cum_loss/eval_interval: .4f}, eval loss {eval_loss/eval_iter: .4f}, time: {time.time() - t0: .2f} seconds")
         cum_loss = 0
         model.train()
 
