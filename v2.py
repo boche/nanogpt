@@ -45,7 +45,6 @@ class MultiHeadAttention(torch.nn.Module):
         B, S, C = x.shape
         qkv = self.qkv_head(x).view(B, S, 3, num_head, C // num_head).permute(2, 0, 3, 1, 4) # 3, B, N, S, H
         q, k, v = qkv[0], qkv[1], qkv[2]
-        # TODO: add positional encoding
 
         if use_flash_attn:
             # TODO: implement flash attention with Triton
@@ -53,6 +52,7 @@ class MultiHeadAttention(torch.nn.Module):
         else:
             # TODO: Don't store self attention because it's expensive
             # TODO: verify the mask is working as expected
+            # TODO: implement other attention, e.g. MQA, GQA, MLA, delta attention
             self.attention = F.softmax(q @ k.transpose(-2,-1) / math.sqrt(C // num_head) + self.mask, dim=-1) # B, N, S, S
             dot_product = self.attn_dropout(self.attention) @ v # B, N, S, H
         dot_product = dot_product.transpose(-2,-3).reshape(B, S, -1) # B, S, N * H
@@ -89,6 +89,7 @@ class NanoGPT(nn.Module):
         super().__init__()
         mask = torch.zeros(block_size, block_size).masked_fill( torch.tril(torch.ones(block_size, block_size)) == 0, float('-inf'),)
         self.token_embedding_table = nn.Embedding(vocab_size, emb_size)
+        # TODO: implement RoPE, sinusoidal
         self.position_embedding_table = nn.Embedding(block_size, emb_size)
         self.decoder_block = nn.ModuleList(
             DecoderBlock(mask) for i in range(decoder_layer)
@@ -188,6 +189,6 @@ outputs = model.generate(torch.ones((batch_size, block_size), dtype=torch.long).
 torch.cuda.synchronize(device)
 print('-'*80)
 param_count = sum(p.numel() for p in model.parameters())
-print(f'parameters: {param_count}')
+print(f'parameters: {param_count:,}')
 print(int(torch.cuda.max_memory_allocated(device)/1024**2), "MiB")
 print('Time consumed: %.2f seconds' % (time.time() - t0))
