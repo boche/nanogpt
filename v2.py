@@ -32,13 +32,10 @@ def build_vocab(text):
 
 class MultiHeadAttention(torch.nn.Module):
     # add local parameters: block_size
-    def __init__(self, num_head, emb_size, head_size):
+    def __init__(self, num_head, emb_size, head_size, mask):
         super().__init__()
-        mask = torch.zeros(block_size, block_size).masked_fill(
-            torch.tril(torch.ones(block_size, block_size)) == 0, float('-inf')
-        )
+        self.mask = mask
         self.qkv_head = nn.Linear(emb_size, emb_size * 3)
-        self.register_buffer('mask', mask)
         self.proj = torch.nn.Linear(num_head * head_size, emb_size)
         # Question: can dropout with same ratio be merged? does it affect gradient when merging
         self.attn_dropout = nn.Dropout(dropout_ratio)
@@ -46,10 +43,8 @@ class MultiHeadAttention(torch.nn.Module):
     
     def forward(self, x):
         B, S, C = x.shape
-        qkv = self.qkv_head(x) # B, S, 3C
-        q = qkv[:,:, :C].view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
-        k = qkv[:,:, C:2*C].view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
-        v = qkv[:,:, 2*C:3*C].view(B, S, num_head, C // num_head).transpose(1, 2) # B, N, S, H
+        qkv = self.qkv_head(x).view(B, S, 3, num_head, C // num_head).permute(2, 0, 3, 1, 4) # 3, B, N, S, H
+        q, k, v = qkv[0], qkv[1], qkv[2]
         # TODO: add positional encoding
 
         if use_flash_attn:
@@ -66,10 +61,10 @@ class MultiHeadAttention(torch.nn.Module):
 
 
 class DecoderBlock(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, mask):
         super().__init__()
         # TODO: Visualize attention weight
-        self.MHA = MultiHeadAttention(num_head, emb_size, emb_size // num_head)
+        self.MHA = MultiHeadAttention(num_head, emb_size, emb_size // num_head, mask)
         self.proj = nn.Sequential(
             nn.Linear(emb_size, 4 * emb_size),
             # TODO: try GELU
@@ -92,16 +87,21 @@ class DecoderBlock(torch.nn.Module):
 class NanoGPT(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
+        mask = torch.zeros(block_size, block_size).masked_fill( torch.tril(torch.ones(block_size, block_size)) == 0, float('-inf'),)
         self.token_embedding_table = nn.Embedding(vocab_size, emb_size)
+        self.position_embedding_table = nn.Embedding(block_size, emb_size)
         self.decoder_block = nn.ModuleList(
-            DecoderBlock() for i in range(decoder_layer)
+            DecoderBlock(mask) for i in range(decoder_layer)
         )
         self.lm_head = nn.Linear(emb_size, vocab_size)
+        self.register_buffer('mask', mask)
 
     def forward(self, input, target):
+        B, S = input.shape
         state = self.token_embedding_table(input) # BATCH x SEQ_LEN x EMB_SIZE
+        pos_emb = self.position_embedding_table(torch.arange(S, device=device)).unsqueeze(0) # 1, S, E
         for i in range(decoder_layer):
-            state = self.decoder_block[i](state)
+            state = self.decoder_block[i](state+pos_emb)
         logits = self.lm_head(state) # BATCH x SEQ_LEN x VOCAB_SIZE
 
         if target is None:
@@ -151,10 +151,7 @@ model = torch.compile(model)
 # TODO: use gradient clipping to stablize model, how to simulate gradient instability
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-# TODO: add monitoring for running time
-# TODO: add monitoring for maxmimal gpu memory used
 # TODO: try low precision representation
-# TODO: try torch.compile
 
 torch.cuda.reset_peak_memory_stats(device)
 t0 = time.time()
@@ -190,5 +187,7 @@ outputs = model.generate(torch.ones((batch_size, block_size), dtype=torch.long).
 
 torch.cuda.synchronize(device)
 print('-'*80)
+param_count = sum(p.numel() for p in model.parameters())
+print(f'parameters: {param_count}')
 print(int(torch.cuda.max_memory_allocated(device)/1024**2), "MiB")
 print('Time consumed: %.2f seconds' % (time.time() - t0))
