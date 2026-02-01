@@ -100,26 +100,18 @@ class NanoGPT(nn.Module):
         )
         self.lm_head = nn.Linear(emb_size, vocab_size)
 
-    def forward(self, input, target):
+    def forward(self, input):
         B, S = input.shape
         state = self.token_embedding_table(input) # BATCH x SEQ_LEN x EMB_SIZE
         pos_emb = self.position_embedding_table(torch.arange(S, device=device)).unsqueeze(0) # 1, S, E
         for i in range(decoder_layer):
             state = self.decoder_block[i](state+pos_emb)
-        logits = self.lm_head(state) # BATCH x SEQ_LEN x VOCAB_SIZE
-
-        if target is None:
-            return logits, None
-        else:
-            B, S, C = logits.shape
-            # TODO: implement cross entropy directly
-            loss = F.cross_entropy(logits.view(B*S, C), target.view(-1))
-            return logits, loss
+        return self.lm_head(state) # BATCH x SEQ_LEN x VOCAB_SIZE
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens):
         for i in range(max_new_tokens):
-            logits, _ = self(idx[:, -block_size:], None) # logits: B, S, V
+            logits = self(idx[:, -block_size:]) # logits: B, S, V
             logits = logits[:, -1, :] # BATCH x VOCAB_SIZE
             probs = F.softmax(logits, dim=-1) # BATCH x VOCAB_SIZE
             token = torch.multinomial(probs, num_samples=1)
@@ -136,6 +128,11 @@ def get_batch(text, split):
     yb = torch.stack([data[i+1:i+1+block_size] for i in ix]) # b * seq_len
 
     return xb, yb
+
+def loss_fn(logits, target):
+    B, S, C = logits.shape
+    # TODO: implement cross entropy directly
+    return F.cross_entropy(logits.view(B*S, C), target.view(-1))
 
 with urllib.request.urlopen(url) as response:
     text = response.read().decode("utf-8")
@@ -164,8 +161,8 @@ for i in range(train_iter):
     optimizer.zero_grad()
 
     with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=use_bf16):
-        # TODO: move loss to fp32
-        logits, loss = model(xb.to(device), yb.to(device))
+        logits = model(xb.to(device))
+    loss = loss_fn(logits, yb.to(device))
     cum_loss += loss.item()
 
     loss.backward()
@@ -179,8 +176,9 @@ for i in range(train_iter):
                 xb, yb = get_batch(text_indices, 'test')
 
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=use_bf16):
-                    _, loss = model(xb.to(device), yb.to(device))
-                eval_loss += loss
+                    logits = model(xb.to(device))
+
+                eval_loss += loss_fn(logits, yb.to(device))
 
         print(f"step {i}, train loss {cum_loss/eval_interval: .4f}, eval loss {eval_loss/eval_iter: .4f}, time: {time.time() - t0: .2f} seconds")
         cum_loss = 0
