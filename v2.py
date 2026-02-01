@@ -20,6 +20,7 @@ eval_interval = 500
 train_iter = 5000
 eval_iter = 100
 use_flash_attn = True
+use_bf16 = True
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
 def build_vocab(text):
@@ -85,7 +86,8 @@ class DecoderBlock(torch.nn.Module):
     def forward(self, x):
         # X: B, S, C
         x = self.alpha[0] * x + self.beta[0] * self.MHA(self.ln1(x))
-        return self.alpha[1] * x + self.beta[1] * self.proj(self.ln2(x))
+        # return self.alpha[1] * x + self.beta[1] * self.proj(self.ln2(x))
+        return x + self.proj(self.ln2(x))
     
 class NanoGPT(nn.Module):
     def __init__(self, vocab_size):
@@ -159,19 +161,25 @@ cum_loss = 0
 
 for i in range(train_iter):
     xb, yb = get_batch(text_indices, 'train')
-    logits, loss = model(xb.to(device), yb.to(device))
+    optimizer.zero_grad()
+
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=use_bf16):
+        # TODO: move loss to fp32
+        logits, loss = model(xb.to(device), yb.to(device))
     cum_loss += loss.item()
 
-    optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+
     if i % eval_interval == 0:
         model.eval()
         with torch.no_grad():
             eval_loss = 0
             for j in range(eval_iter):
                 xb, yb = get_batch(text_indices, 'test')
-                _, loss = model(xb.to(device), yb.to(device))
+
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=use_bf16):
+                    _, loss = model(xb.to(device), yb.to(device))
                 eval_loss += loss
 
         print(f"step {i}, train loss {cum_loss/eval_interval: .4f}, eval loss {eval_loss/eval_iter: .4f}, time: {time.time() - t0: .2f} seconds")
@@ -180,7 +188,8 @@ for i in range(train_iter):
 
 generate_start_time = time.time()
 model.eval()
-outputs = model.generate(torch.ones((1, 1), dtype=torch.long).to(device), max_new_tokens=10000)
+with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=use_bf16):
+    outputs = model.generate(torch.ones((1, 1), dtype=torch.long).to(device), max_new_tokens=10000)
 generate_end_time = time.time()
 
 torch.cuda.synchronize(device)
