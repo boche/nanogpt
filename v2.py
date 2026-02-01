@@ -79,12 +79,13 @@ class DecoderBlock(torch.nn.Module):
         # TODO: implement layer norm directly
         self.ln1 = nn.LayerNorm(emb_size)
         self.ln2 = nn.LayerNorm(emb_size)
-        
+        self.alpha = nn.Parameter(torch.ones(2,1))
+        self.beta = nn.Parameter(torch.ones(2,1))
 
     def forward(self, x):
         # X: B, S, C
-        x = x + self.MHA(self.ln1(x))
-        return x + self.proj(self.ln2(x))
+        x = self.alpha[0] * x + self.beta[0] * self.MHA(self.ln1(x))
+        return self.alpha[1] * x + self.beta[1] * self.proj(self.ln2(x))
     
 class NanoGPT(nn.Module):
     def __init__(self, vocab_size):
@@ -187,7 +188,7 @@ print('-'*80)
 param_count = sum(p.numel() for p in model.parameters())
 print(f'parameters: {param_count:,}')
 print(int(torch.cuda.max_memory_allocated(device)/1024**2), "MiB")
-print('Train time: %.2f seconds, Generate time: %.2f' % (generate_start_time - t0, generate_end_time - generate_start_time))
+print('Train time: %.2f seconds, Generate time: %.2f seconds' % (generate_start_time - t0, generate_end_time - generate_start_time))
 
 for output in outputs:
     print(decode(output.view(-1).tolist()))
