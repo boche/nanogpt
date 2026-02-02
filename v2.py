@@ -9,9 +9,9 @@ import time
 # hyperparameters
 device = "cuda" if torch.cuda.is_available() else "cpu"
 seed = 42
-emb_size = 512 
-batch_size = 64
-block_size = 128
+emb_size = 256 
+batch_size = 128
+block_size = 256
 num_head = 8
 decoder_layer = 6
 lr = 3e-4
@@ -104,8 +104,9 @@ class NanoGPT(nn.Module):
         B, S = input.shape
         state = self.token_embedding_table(input) # BATCH x SEQ_LEN x EMB_SIZE
         pos_emb = self.position_embedding_table(torch.arange(S, device=device)).unsqueeze(0) # 1, S, E
+        state = state + pos_emb
         for i in range(decoder_layer):
-            state = self.decoder_block[i](state+pos_emb)
+            state = self.decoder_block[i](state)
         return self.lm_head(state) # BATCH x SEQ_LEN x VOCAB_SIZE
 
     @torch.no_grad()
@@ -197,5 +198,5 @@ print(f'parameters: {param_count:,}')
 print(int(torch.cuda.max_memory_allocated(device)/1024**2), "MiB")
 print('Train time: %.2f seconds, Generate time: %.2f seconds' % (generate_start_time - t0, generate_end_time - generate_start_time))
 
-for output in outputs:
-    print(decode(output.view(-1).tolist()))
+# for output in outputs:
+#     print(decode(output.view(-1).tolist()))
