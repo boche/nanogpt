@@ -46,7 +46,7 @@ class MultiHeadAttention(torch.nn.Module):
     def forward(self, x):
         B, S, C = x.shape
         qkv = self.qkv_head(x).view(B, S, 3, num_head, C // num_head).permute(2, 0, 3, 1, 4) # 3, B, N, S, H
-        q, k, v = qkv[1], qkv[1], qkv[2]
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
         if use_flash_attn:
             # TODO: implement flash attention with Triton
@@ -56,7 +56,7 @@ class MultiHeadAttention(torch.nn.Module):
             # TODO: verify the mask is working as expected
             # TODO: implement other attention, e.g. MQA, GQA, MLA, delta attention
             self.attention = F.softmax(q @ k.transpose(-2,-1) / math.sqrt(C // num_head), dim=-1).masked_fill(
-                self.bias[:, :, :B, :B] == 0, float('-inf')
+                self.bias[:, :, :S, :S] == 0, float('-inf')
             ) # B, N, S, S
             dot_product = self.attn_dropout(self.attention) @ v # B, N, S, H
 
@@ -148,7 +148,7 @@ torch.set_float32_matmul_precision('high')
 model = torch.compile(model)
 
 # TODO: use gradient clipping to stablize model, how to simulate gradient instability
-optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+optimizer = torch.optim.AdamW(model.parameters(), lr=lr, fused=True)
 
 # TODO: try low precision representation
 torch.cuda.reset_peak_memory_stats(device)
@@ -158,7 +158,7 @@ cum_loss = 0
 
 for i in range(train_iter):
     xb, yb = get_batch(text_indices, 'train')
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
     with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=use_bf16):
         logits = model(xb.to(device))
