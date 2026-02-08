@@ -46,13 +46,12 @@ class MultiHeadAttention(torch.nn.Module):
     def forward(self, x):
         B, S, C = x.shape
         qkv = self.qkv_head(x).view(B, S, 3, num_head, C // num_head).permute(2, 0, 3, 1, 4) # 3, B, N, S, H
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        q, k, v = qkv[0], qkv[1], qkv[2] # B, N, S, H
 
         if use_flash_attn:
             # TODO: implement flash attention with Triton
             dot_product = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_ratio if self.training else 0, is_causal=True)
         else:
-            # TODO: Don't store self attention because it's expensive
             # TODO: verify the mask is working as expected
             # TODO: implement other attention, e.g. MQA, GQA, MLA, delta attention
             self.attention = F.softmax(q @ k.transpose(-2,-1) / math.sqrt(C // num_head), dim=-1).masked_fill(
@@ -60,7 +59,7 @@ class MultiHeadAttention(torch.nn.Module):
             ) # B, N, S, S
             dot_product = self.attn_dropout(self.attention) @ v # B, N, S, H
 
-        dot_product = dot_product.transpose(-2,-3).reshape(B, S, -1) # B, S, N * H
+        dot_product = dot_product.transpose(-2,-3).reshape(B, S, -1) # B, S, N * H -> B, S, C
         # Question: add a non-linear layer between attn and final projection
         return self.proj_dropout(self.proj(dot_product))
 
@@ -78,16 +77,15 @@ class DecoderBlock(torch.nn.Module):
         )
         # Question: how to compute gradient for layer/batch norm?
         # TODO: implement layer norm directly
-        self.ln1 = nn.LayerNorm(emb_size)
-        self.ln2 = nn.LayerNorm(emb_size)
+        # TODO: compare layer norm with RMS norm, why pick RMS norm?
         self.alpha = nn.Parameter(torch.ones(2,1))
         self.beta = nn.Parameter(torch.ones(2,1))
 
     def forward(self, x):
         # X: B, S, C
-        x = self.alpha[0] * x + self.beta[0] * self.MHA(self.ln1(x))
+        x = self.alpha[0] * x + self.beta[0] * self.MHA(F.rms_norm(x, (x.size(-1),)))
         # return self.alpha[1] * x + self.beta[1] * self.proj(self.ln2(x))
-        return x + self.proj(self.ln2(x))
+        return x + self.proj(F.rms_norm(x, (x.size(-1),)))
     
 class NanoGPT(nn.Module):
     def __init__(self, vocab_size):
@@ -102,12 +100,12 @@ class NanoGPT(nn.Module):
 
     def forward(self, input):
         B, S = input.shape
-        state = self.token_embedding_table(input) # BATCH x SEQ_LEN x EMB_SIZE
+        state = self.token_embedding_table(input) # B, S, C
         pos_emb = self.position_embedding_table(torch.arange(S, device=device)).unsqueeze(0) # 1, S, E
         state = state + pos_emb
         for i in range(decoder_layer):
             state = self.decoder_block[i](state)
-        return self.lm_head(state) # BATCH x SEQ_LEN x VOCAB_SIZE
+        return self.lm_head(F.rms_norm(state, (state.size(-1),))) # BATCH x SEQ_LEN x VOCAB_SIZE
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens):
@@ -140,7 +138,6 @@ with urllib.request.urlopen(url) as response:
 
 chars, encode, decode = build_vocab(text)
 vocab_size = len(chars)
-# TODO: don't store unnecessary data on gpu
 text_indices = torch.tensor(encode(text), dtype=torch.long)
 torch.manual_seed(seed)
 
@@ -149,6 +146,7 @@ torch.set_float32_matmul_precision('high')
 model = torch.compile(model)
 
 # TODO: use gradient clipping to stablize model, how to simulate gradient instability
+# TODO: try other optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, fused=True)
 
 # TODO: try low precision representation
@@ -188,7 +186,7 @@ for i in range(train_iter):
 generate_start_time = time.time()
 model.eval()
 with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=use_bf16):
-    outputs = model.generate(torch.ones((1, 1), dtype=torch.long).to(device), max_new_tokens=10000)
+    outputs = model.generate(torch.ones((8, 1), dtype=torch.long).to(device), max_new_tokens=10000)
 generate_end_time = time.time()
 
 torch.cuda.synchronize(device)
