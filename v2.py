@@ -95,8 +95,7 @@ class DecoderBlock(torch.nn.Module):
         self.MHA = MultiHeadAttention(num_head, emb_size, emb_size // num_head)
         self.proj = nn.Sequential(
             nn.Linear(emb_size, 4 * emb_size),
-            # TODO: try GELU
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * emb_size, emb_size),
             nn.Dropout(dropout_ratio)
         )
@@ -170,7 +169,6 @@ model = NanoGPT(vocab_size).to(device)
 torch.set_float32_matmul_precision('high')
 model = torch.compile(model)
 
-# TODO: use gradient clipping to stablize model, how to simulate gradient instability
 # TODO: try other optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, fused=True)
 
@@ -190,6 +188,7 @@ for i in range(1, 1+train_iter):
     cum_loss += loss.item()
 
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
 
     if i % eval_interval == 0:
