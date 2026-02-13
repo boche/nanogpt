@@ -117,6 +117,7 @@ class NanoGPT(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, emb_size)
         # TODO: implement RoPE, sinusoidal
         self.position_embedding_table = nn.Embedding(block_size, emb_size)
+        # TODO: implement hybrid attention with sssl switch 
         self.decoder_block = nn.ModuleList(
             DecoderBlock() for i in range(decoder_layer)
         )
