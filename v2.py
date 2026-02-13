@@ -52,10 +52,11 @@ class MultiHeadAttention(torch.nn.Module):
             # TODO: implement flash attention with Triton
             dot_product = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_ratio if self.training else 0, is_causal=True)
         else:
-            # TODO: verify the mask is working as expected
             # TODO: implement other attention, e.g. MQA, GQA, MLA, delta attention
-            self.attention = F.softmax(q @ k.transpose(-2,-1) / math.sqrt(C // num_head), dim=-1).masked_fill(
-                self.bias[:, :, :S, :S] == 0, float('-inf')
+            qk_product = q @ k.transpose(-2,-1) / math.sqrt(C // num_head)
+            self.attention = F.softmax(
+                qk_product.masked_fill(self.bias[:, :, :S, :S] == 0, float('-inf')),
+                dim = -1
             ) # B, N, S, S
             dot_product = self.attn_dropout(self.attention) @ v # B, N, S, H
 
