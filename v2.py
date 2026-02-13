@@ -9,17 +9,26 @@ import time
 # hyperparameters
 device = "cuda" if torch.cuda.is_available() else "cpu"
 seed = 42
+
+# model param
 emb_size = 256 
-batch_size = 128
 block_size = 256
-num_head = 8
 decoder_layer = 6
-lr = 3e-4
 dropout_ratio = 0.2
-eval_interval = 500
-train_iter = 5000
+lr = 3e-4
+
+# train param
+eval_interval = 1000
+train_iter = 4000
 eval_iter = 100
+batch_size = 128
+
+# atttention param
+num_head = 8
 use_flash_attn = True
+group_size = 2 
+use_gqa = group_size > 1
+
 use_bf16 = True
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
@@ -35,7 +44,11 @@ class MultiHeadAttention(torch.nn.Module):
     # add local parameters: block_size
     def __init__(self, num_head, emb_size, head_size):
         super().__init__()
-        self.qkv_head = nn.Linear(emb_size, emb_size * 3)
+        if use_gqa:
+            self.qkv_head = nn.Linear(emb_size, emb_size + emb_size * 2 // group_size)
+        else:
+            self.qkv_head = nn.Linear(emb_size, emb_size * 3)
+
         self.proj = torch.nn.Linear(num_head * head_size, emb_size)
         # Question: can dropout with same ratio be merged? does it affect gradient when merging
         self.attn_dropout = nn.Dropout(dropout_ratio)
@@ -45,12 +58,23 @@ class MultiHeadAttention(torch.nn.Module):
     
     def forward(self, x):
         B, S, C = x.shape
-        qkv = self.qkv_head(x).view(B, S, 3, num_head, C // num_head).permute(2, 0, 3, 1, 4) # 3, B, N, S, H
-        q, k, v = qkv[0], qkv[1], qkv[2] # B, N, S, H
+        if use_gqa:
+            qkv_prod = self.qkv_head(x) # B, S, Mixed
+            q = qkv_prod[:, :, :emb_size].view(B, S, num_head, -1).permute(0, 2, 1, 3) # B, H, S, C
+            k = qkv_prod[:, :, emb_size:emb_size+emb_size//group_size].view(B, S, num_head//group_size, -1).permute(0, 2, 1, 3) # B, H/G, S, C
+            v = qkv_prod[:, :, emb_size+emb_size//group_size:].view(B, S, num_head//group_size, -1).permute(0, 2, 1, 3) # B, H/G, S, C
+
+        else:
+            qkv = self.qkv_head(x).view(B, S, 3, num_head, C // num_head).permute(2, 0, 3, 1, 4) # 3, B, N, S, H
+            q, k, v = qkv[0], qkv[1], qkv[2] # B, N, S, H
 
         if use_flash_attn:
             # TODO: implement flash attention with Triton
-            dot_product = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_ratio if self.training else 0, is_causal=True)
+            if use_gqa:
+                dot_product = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_ratio if self.training else 0, is_causal=True, enable_gqa=use_gqa)
+            else:
+                dot_product = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_ratio if self.training else 0, is_causal=True)
+
         else:
             # TODO: implement other attention, e.g. MQA, GQA, MLA, delta attention
             qk_product = q @ k.transpose(-2,-1) / math.sqrt(C // num_head)
@@ -156,7 +180,7 @@ t0 = time.time()
 
 cum_loss = 0
 
-for i in range(train_iter):
+for i in range(1, 1+train_iter):
     xb, yb = get_batch(text_indices, 'train')
     optimizer.zero_grad(set_to_none=True)
 
