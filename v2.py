@@ -170,7 +170,8 @@ torch.set_float32_matmul_precision('high')
 model = torch.compile(model)
 
 # TODO: try other optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=lr, fused=True)
+# TODO: understand AdamW better
+optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, fused=(device=="cuda"))
 
 # TODO: try low precision representation
 torch.cuda.reset_peak_memory_stats(device)
