@@ -26,6 +26,7 @@ num_head = 8
 use_flash_attn = True
 group_size = 2
 use_gqa = group_size > 1
+model_path = "model.pt"
 
 use_bf16 = True
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -122,6 +123,10 @@ for i in range(1, 1 + train_iter):
         cum_loss = 0
         model.train()
 
+torch.save(model.state_dict(), model_path)
+model.load_state_dict(torch.load(model_path, map_location=device))
+model.to(device)
+
 generate_start_time = time.time()
 model.eval()
 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
@@ -135,10 +140,6 @@ print("-" * 80)
 param_count = sum(p.numel() for p in model.parameters())
 print(f"parameters: {param_count:,}")
 print(int(torch.cuda.max_memory_allocated(device) / 1024**2), "MiB")
-print(
-    "Train time: %.2f seconds, Generate time: %.2f seconds"
-    % (generate_start_time - t0, generate_end_time - generate_start_time)
-)
 print(
     "Train time: %.2f seconds, Generate time: %.2f seconds"
     % (generate_start_time - t0, generate_end_time - generate_start_time)
