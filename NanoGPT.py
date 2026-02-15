@@ -1,4 +1,6 @@
 import math
+from dataclasses import dataclass
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -10,37 +12,68 @@ def loss_fn(logits, target):
     return F.cross_entropy(logits.view(B * S, C), target.view(-1))
 
 
+@dataclass(frozen=True)
+class NanoGPTConfig:
+    vocab_size: int
+    emb_size: int
+    block_size: int
+    num_layers: int
+    num_heads: int
+    dropout_ratio: float
+    use_flash_attn: bool
+    group_size: int = 1
+
+    def __post_init__(self):
+        if self.vocab_size <= 0:
+            raise ValueError("vocab_size must be greater than 0")
+        if self.emb_size <= 0:
+            raise ValueError("emb_size must be greater than 0")
+        if self.block_size <= 0:
+            raise ValueError("block_size must be greater than 0")
+        if self.num_layers <= 0:
+            raise ValueError("num_layers must be greater than 0")
+        if self.num_heads <= 0:
+            raise ValueError("num_heads must be greater than 0")
+        if self.group_size <= 0:
+            raise ValueError("group_size must be greater than 0")
+        if self.group_size > self.num_heads:
+            raise ValueError("group_size cannot exceed num_heads")
+        if self.num_heads % self.group_size != 0:
+            raise ValueError("num_heads must be divisible by group_size")
+        if self.emb_size % self.num_heads != 0:
+            raise ValueError("emb_size must be divisible by num_heads")
+        if self.emb_size % self.group_size != 0:
+            raise ValueError("emb_size must be divisible by group_size")
+        if not (0.0 <= self.dropout_ratio <= 1.0):
+            raise ValueError("dropout_ratio must be in [0, 1]")
+
+
 class MultiHeadAttention(nn.Module):
     # add local parameters: block_size
-    def __init__(
-        self, block_size, num_head, emb_size, dropout_ratio, use_flash_attn, group_size
-    ):
+    def __init__(self, config: NanoGPTConfig):
         super().__init__()
-
-        self.block_size = block_size
-        self.num_head = num_head
-        self.emb_size = emb_size
-        self.dropout_ratio = dropout_ratio
-        self.use_flash_attn = use_flash_attn
-        self.group_size = group_size
-        self.use_gqa = (group_size > 1) & use_flash_attn
-        self.head_size = emb_size // num_head
+        self.config = config
+        self.use_gqa = (config.group_size > 1) and config.use_flash_attn
+        self.head_size = config.emb_size // config.num_heads
 
         if self.use_gqa:
-            self.qkv_head = nn.Linear(emb_size, emb_size + emb_size * 2 // group_size)
+            self.qkv_head = nn.Linear(
+                config.emb_size,
+                config.emb_size + config.emb_size * 2 // config.group_size,
+            )
         else:
-            self.qkv_head = nn.Linear(emb_size, emb_size * 3)
+            self.qkv_head = nn.Linear(config.emb_size, config.emb_size * 3)
 
-        self.proj = nn.Linear(emb_size, emb_size)
+        self.proj = nn.Linear(config.emb_size, config.emb_size)
         # Question: can dropout with same ratio be merged? does it affect gradient when merging
-        self.attn_dropout = nn.Dropout(dropout_ratio)
-        self.proj_dropout = nn.Dropout(dropout_ratio)
-        if not use_flash_attn:
+        self.attn_dropout = nn.Dropout(config.dropout_ratio)
+        self.proj_dropout = nn.Dropout(config.dropout_ratio)
+        if not config.use_flash_attn:
             self.register_buffer(
                 "bias",
                 torch.tril(
-                    torch.ones(block_size, block_size).view(
-                        1, 1, block_size, block_size
+                    torch.ones(config.block_size, config.block_size).view(
+                        1, 1, config.block_size, config.block_size
                     )
                 ),
             )
@@ -50,58 +83,43 @@ class MultiHeadAttention(nn.Module):
         if self.use_gqa:
             qkv_prod = self.qkv_head(x)  # B, S, Mixed
             q = (
-                qkv_prod[:, :, : self.emb_size]
-                .view(B, S, self.num_head, -1)
+                qkv_prod[:, :, : self.config.emb_size]
+                .view(B, S, self.config.num_heads, -1)
                 .permute(0, 2, 1, 3)
             )  # B, H, S, C
+            kv_width = self.config.emb_size // self.config.group_size
             k = (
-                qkv_prod[
-                    :,
-                    :,
-                    self.emb_size : self.emb_size + self.emb_size // self.group_size,
-                ]
-                .view(B, S, self.num_head // self.group_size, -1)
+                qkv_prod[:, :, self.config.emb_size : self.config.emb_size + kv_width]
+                .view(B, S, self.config.num_heads // self.config.group_size, -1)
                 .permute(0, 2, 1, 3)
             )  # B, H/G, S, C
             v = (
-                qkv_prod[:, :, self.emb_size + self.emb_size // self.group_size :]
-                .view(B, S, self.num_head // self.group_size, -1)
+                qkv_prod[:, :, self.config.emb_size + kv_width :]
+                .view(B, S, self.config.num_heads // self.config.group_size, -1)
                 .permute(0, 2, 1, 3)
             )  # B, H/G, S, C
 
         else:
             qkv = (
                 self.qkv_head(x)
-                .view(B, S, 3, self.num_head, C // self.num_head)
+                .view(B, S, 3, self.config.num_heads, C // self.config.num_heads)
                 .permute(2, 0, 3, 1, 4)
             )  # 3, B, N, S, H
             q, k, v = qkv[0], qkv[1], qkv[2]  # B, N, S, H
 
-        if self.use_flash_attn:
-            # TODO: implement flash attention with Triton
-            if self.use_gqa:
-                dot_product = F.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    attn_mask=None,
-                    dropout_p=self.dropout_ratio if self.training else 0,
-                    is_causal=True,
-                    enable_gqa=self.use_gqa,
-                )
-            else:
-                dot_product = F.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    attn_mask=None,
-                    dropout_p=self.dropout_ratio if self.training else 0,
-                    is_causal=True,
-                )
-
+        if self.config.use_flash_attn:
+            dot_product = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=self.config.dropout_ratio if self.training else 0,
+                is_causal=True,
+                enable_gqa=self.use_gqa,
+            )
         else:
             # TODO: implement other attention, e.g. MQA, GQA, MLA, delta attention
-            qk_product = q @ k.transpose(-2, -1) / math.sqrt(C // self.num_head)
+            qk_product = q @ k.transpose(-2, -1) / math.sqrt(C // self.config.num_heads)
             self.attention = F.softmax(
                 qk_product.masked_fill(self.bias[:, :, :S, :S] == 0, float("-inf")),
                 dim=-1,
@@ -116,27 +134,17 @@ class MultiHeadAttention(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(
-        self, block_size, num_head, emb_size, dropout_ratio, use_flash_attn, group_size
-    ):
+    def __init__(self, config: NanoGPTConfig):
         super().__init__()
-
-        self.block_size = block_size
-        self.num_head = num_head
-        self.emb_size = emb_size
-        self.dropout_ratio = dropout_ratio
-        self.use_flash_attn = use_flash_attn
-        self.group_size = group_size
+        self.config = config
 
         # TODO: Visualize attention weight
-        self.MHA = MultiHeadAttention(
-            block_size, num_head, emb_size, dropout_ratio, use_flash_attn, group_size
-        )
+        self.MHA = MultiHeadAttention(config)
         self.proj = nn.Sequential(
-            nn.Linear(emb_size, 4 * emb_size),
+            nn.Linear(config.emb_size, 4 * config.emb_size),
             nn.GELU(),
-            nn.Linear(4 * emb_size, emb_size),
-            nn.Dropout(dropout_ratio),
+            nn.Linear(4 * config.emb_size, config.emb_size),
+            nn.Dropout(config.dropout_ratio),
         )
         # Question: how to compute gradient for layer/batch norm?
         # TODO: implement layer norm directly
@@ -152,43 +160,18 @@ class DecoderBlock(nn.Module):
 
 
 class NanoGPT(nn.Module):
-    def __init__(
-        self,
-        vocab_size,
-        emb_size,
-        block_size,
-        decoder_layer,
-        num_head,
-        dropout_ratio,
-        use_flash_attn,
-        group_size,
-    ):
+    def __init__(self, config: NanoGPTConfig):
         super().__init__()
-        self.vocab_size = vocab_size
-        self.emb_size = emb_size
-        self.block_size = block_size
-        self.decoder_layer = decoder_layer
-        self.num_head = num_head
-        self.dropout_ratio = dropout_ratio
-        self.use_flash_attn = use_flash_attn
-        self.group_size = group_size
+        self.config = config
 
-        self.token_embedding_table = nn.Embedding(vocab_size, emb_size)
+        self.token_embedding_table = nn.Embedding(config.vocab_size, config.emb_size)
         # TODO: implement RoPE, sinusoidal
-        self.position_embedding_table = nn.Embedding(block_size, emb_size)
+        self.position_embedding_table = nn.Embedding(config.block_size, config.emb_size)
         # TODO: implement hybrid attention with sssl switch
         self.decoder_block = nn.ModuleList(
-            DecoderBlock(
-                block_size,
-                num_head,
-                emb_size,
-                dropout_ratio,
-                use_flash_attn,
-                group_size,
-            )
-            for i in range(decoder_layer)
+            DecoderBlock(config) for _ in range(config.num_layers)
         )
-        self.lm_head = nn.Linear(emb_size, vocab_size)
+        self.lm_head = nn.Linear(config.emb_size, config.vocab_size)
 
     def forward(self, input):
         B, S = input.shape
@@ -199,7 +182,7 @@ class NanoGPT(nn.Module):
             0
         )  # 1, S, E
         state = state + pos_emb
-        for i in range(self.decoder_layer):
+        for i in range(self.config.num_layers):
             state = self.decoder_block[i](state)
         return self.lm_head(
             F.rms_norm(state, (state.size(-1),))
@@ -208,7 +191,7 @@ class NanoGPT(nn.Module):
     @torch.no_grad()
     def generate(self, idx, max_new_tokens):
         for i in range(max_new_tokens):
-            logits = self(idx[:, -self.block_size :])  # logits: B, S, V
+            logits = self(idx[:, -self.config.block_size :])  # logits: B, S, V
             logits = logits[:, -1, :]  # BATCH x VOCAB_SIZE
             probs = F.softmax(logits, dim=-1)  # BATCH x VOCAB_SIZE
             token = torch.multinomial(probs, num_samples=1)

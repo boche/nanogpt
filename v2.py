@@ -1,35 +1,36 @@
+from dataclasses import dataclass, replace
 import urllib.request
 import torch
 import time
-from NanoGPT import NanoGPT, loss_fn
+from NanoGPT import NanoGPT, NanoGPTConfig, loss_fn
 
 
-# hyperparameters
-device = "cuda" if torch.cuda.is_available() else "cpu"
-seed = 42
+@dataclass(frozen=True)
+class TrainConfig:
+    seed: int = 42
+    eval_interval: int = 1000
+    train_iter: int = 4000
+    eval_iter: int = 100
+    batch_size: int = 128
+    lr: float = 3e-4
+    use_bf16: bool = True
+    model_path: str = "model.pt"
+    url: str = (
+        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/"
+        "tinyshakespeare/input.txt"
+    )
 
-# model param
-emb_size = 256
-block_size = 256
-decoder_layer = 6
-dropout_ratio = 0.2
-lr = 3e-4
 
-# train param
-eval_interval = 1000
-train_iter = 4000
-eval_iter = 100
-batch_size = 128
-
-# atttention param
-num_head = 8
-use_flash_attn = True
-group_size = 2
-use_gqa = group_size > 1
-model_path = "model.pt"
-
-use_bf16 = True
-url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+model_cfg = NanoGPTConfig(
+    vocab_size=1,
+    emb_size=256,
+    block_size=256,
+    num_layers=6,
+    num_heads=8,
+    dropout_ratio=0.2,
+    use_flash_attn=True,
+    group_size=2,
+)
 
 
 def build_vocab(text):
@@ -41,7 +42,7 @@ def build_vocab(text):
     return chars, encode, decode
 
 
-def get_batch(text, split):
+def get_batch(text, split, batch_size, block_size):
     train, val = text[: int(0.9 * len(text))], text[int(0.9 * len(text)) :]
     data = train if split == "train" else val
 
@@ -53,24 +54,22 @@ def get_batch(text, split):
     return xb, yb
 
 
-with urllib.request.urlopen(url) as response:
+train_cfg = TrainConfig()
+
+# model and runtime config
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+with urllib.request.urlopen(train_cfg.url) as response:
     text = response.read().decode("utf-8")
 
 chars, encode, decode = build_vocab(text)
-vocab_size = len(chars)
-text_indices = torch.tensor(encode(text), dtype=torch.long)
-torch.manual_seed(seed)
+model_cfg = replace(model_cfg, vocab_size=len(chars))
 
-model = NanoGPT(
-    vocab_size,
-    emb_size,
-    block_size,
-    decoder_layer,
-    num_head,
-    dropout_ratio,
-    use_flash_attn,
-    group_size,
-).to(device)
+text_indices = torch.tensor(encode(text), dtype=torch.long)
+torch.manual_seed(train_cfg.seed)
+
+
+model = NanoGPT(model_cfg).to(device)
 torch.set_float32_matmul_precision("high")
 model = torch.compile(model)
 
@@ -78,7 +77,7 @@ model = torch.compile(model)
 # TODO: understand AdamW better
 optimizer = torch.optim.AdamW(
     model.parameters(),
-    lr=lr,
+    lr=train_cfg.lr,
     betas=(0.9, 0.95),
     weight_decay=0.1,
     fused=(device == "cuda"),
@@ -90,11 +89,15 @@ t0 = time.time()
 
 cum_loss = 0
 
-for i in range(1, 1 + train_iter):
-    xb, yb = get_batch(text_indices, "train")
+for i in range(1, 1 + train_cfg.train_iter):
+    xb, yb = get_batch(
+        text_indices, "train", train_cfg.batch_size, model_cfg.block_size
+    )
     optimizer.zero_grad(set_to_none=True)
 
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+    with torch.autocast(
+        device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
+    ):
         logits = model(xb.to(device))
     loss = loss_fn(logits, yb.to(device))
     cum_loss += loss.item()
@@ -103,33 +106,37 @@ for i in range(1, 1 + train_iter):
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
 
-    if i % eval_interval == 0:
+    if i % train_cfg.eval_interval == 0:
         model.eval()
         with torch.no_grad():
             eval_loss = 0
-            for j in range(eval_iter):
-                xb, yb = get_batch(text_indices, "test")
+            for j in range(train_cfg.eval_iter):
+                xb, yb = get_batch(
+                    text_indices, "test", train_cfg.batch_size, model_cfg.block_size
+                )
 
                 with torch.autocast(
-                    device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16
+                    device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
                 ):
                     logits = model(xb.to(device))
 
                 eval_loss += loss_fn(logits, yb.to(device))
 
         print(
-            f"step {i}, train loss {cum_loss/eval_interval: .4f}, eval loss {eval_loss/eval_iter: .4f}, time: {time.time() - t0: .2f} seconds"
+            f"step {i}, train loss {cum_loss/train_cfg.eval_interval: .4f}, eval loss {eval_loss/train_cfg.eval_iter: .4f}, time: {time.time() - t0: .2f} seconds"
         )
         cum_loss = 0
         model.train()
 
-torch.save(model.state_dict(), model_path)
-model.load_state_dict(torch.load(model_path, map_location=device))
+torch.save(model.state_dict(), train_cfg.model_path)
+model.load_state_dict(torch.load(train_cfg.model_path, map_location=device))
 model.to(device)
 
 generate_start_time = time.time()
 model.eval()
-with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+with torch.autocast(
+    device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
+):
     outputs = model.generate(
         torch.ones((8, 1), dtype=torch.long).to(device), max_new_tokens=10000
     )
