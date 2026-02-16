@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+import sys
 
 import torch
 from torch import nn
@@ -78,8 +79,9 @@ class MultiHeadAttention(nn.Module):
                 ),
             )
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None):
         B, S, C = x.shape
+
         if self.use_gqa:
             qkv_prod = self.qkv_head(x)  # B, S, Mixed
             q = (
@@ -107,6 +109,15 @@ class MultiHeadAttention(nn.Module):
             )  # 3, B, N, S, H
             q, k, v = qkv[0], qkv[1], qkv[2]  # B, N, S, H
 
+        if kv_cache is not None:
+            if len(kv_cache) > 0:
+                k = torch.cat(
+                    (kv_cache[0][:, :, 1 - self.config.block_size :, :], k), dim=2
+                )  # B, N, S, H
+                v = torch.cat(
+                    (kv_cache[1][:, :, 1 - self.config.block_size :, :], v), dim=2
+                )  # B, N, S, H
+
         if self.config.use_flash_attn:
             dot_product = F.scaled_dot_product_attention(
                 q,
@@ -119,6 +130,7 @@ class MultiHeadAttention(nn.Module):
             )
         else:
             # TODO: implement other attention, e.g. MQA, GQA, MLA, delta attention
+            # TODO: update attention mask to support kv cache
             qk_product = q @ k.transpose(-2, -1) / math.sqrt(C // self.config.num_heads)
             self.attention = F.softmax(
                 qk_product.masked_fill(self.bias[:, :, :S, :S] == 0, float("-inf")),
@@ -130,7 +142,7 @@ class MultiHeadAttention(nn.Module):
             B, S, -1
         )  # B, S, N * H -> B, S, C
         # Question: add a non-linear layer between attn and final projection
-        return self.proj_dropout(self.proj(dot_product))
+        return self.proj_dropout(self.proj(dot_product)), (k, v)
 
 
 class DecoderBlock(nn.Module):
@@ -152,11 +164,16 @@ class DecoderBlock(nn.Module):
         self.alpha = nn.Parameter(torch.ones(2, 1))
         self.beta = nn.Parameter(torch.ones(2, 1))
 
-    def forward(self, x):
+    def forward(self, x, past_kv_cache=None):
         # X: B, S, C
-        x = self.alpha[0] * x + self.beta[0] * self.MHA(F.rms_norm(x, (x.size(-1),)))
-        # return self.alpha[1] * x + self.beta[1] * self.proj(self.ln2(x))
-        return x + self.proj(F.rms_norm(x, (x.size(-1),)))
+        attention_output, new_kv_cache = self.MHA(
+            F.rms_norm(x, (x.size(-1),)), past_kv_cache
+        )
+        x = self.alpha[0] * x + self.beta[0] * attention_output
+        return (
+            self.alpha[1] * x + self.beta[1] * self.proj(F.rms_norm(x, (x.size(-1),))),
+            new_kv_cache,
+        )
 
 
 class NanoGPT(nn.Module):
@@ -166,32 +183,47 @@ class NanoGPT(nn.Module):
 
         self.token_embedding_table = nn.Embedding(config.vocab_size, config.emb_size)
         # TODO: implement RoPE, sinusoidal
-        self.position_embedding_table = nn.Embedding(config.block_size, config.emb_size)
+        # TODO: implement position embedding that supports kv cache
+        # self.position_embedding_table = nn.Embedding(config.block_size, config.emb_size)
         # TODO: implement hybrid attention with sssl switch
         self.decoder_block = nn.ModuleList(
             DecoderBlock(config) for _ in range(config.num_layers)
         )
         self.lm_head = nn.Linear(config.emb_size, config.vocab_size)
 
-    def forward(self, input):
+    def forward(self, input, past_kv_cache=None):
         B, S = input.shape
         state = self.token_embedding_table(input)  # B, S, C
-        pos_emb = self.position_embedding_table(
-            torch.arange(S, device=input.device)
-        ).unsqueeze(
-            0
-        )  # 1, S, E
-        state = state + pos_emb
+        # pos_emb = self.position_embedding_table(
+        #     torch.arange(S, device=input.device)
+        # ).unsqueeze(
+        #     0
+        # )  # 1, S, E
+        # state = state + pos_emb
         for i in range(self.config.num_layers):
-            state = self.decoder_block[i](state)
-        return self.lm_head(
-            F.rms_norm(state, (state.size(-1),))
-        )  # BATCH x SEQ_LEN x VOCAB_SIZE
+            state, kv_cache = self.decoder_block[i](
+                state, past_kv_cache[i] if past_kv_cache is not None else None
+            )
+            if past_kv_cache is not None:
+                past_kv_cache[i] = kv_cache
+
+        return (
+            self.lm_head(
+                F.rms_norm(state, (state.size(-1),))
+            ),  # BATCH x SEQ_LEN x VOCAB_SIZE
+            past_kv_cache,
+        )
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens):
+    def generate(self, idx, max_new_tokens, use_kv_cache=True):
+        past_kv_cache = (
+            [[] for i in range(self.config.num_layers)] if use_kv_cache else None
+        )
         for i in range(max_new_tokens):
-            logits = self(idx[:, -self.config.block_size :])  # logits: B, S, V
+            input_seq_len = 1 if use_kv_cache else self.config.block_size
+            logits, past_kv_cache = self(
+                idx[:, -input_seq_len:], past_kv_cache
+            )  # logits: B, S, V
             logits = logits[:, -1, :]  # BATCH x VOCAB_SIZE
             probs = F.softmax(logits, dim=-1)  # BATCH x VOCAB_SIZE
             token = torch.multinomial(probs, num_samples=1)

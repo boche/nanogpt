@@ -98,7 +98,7 @@ for i in range(1, 1 + train_cfg.train_iter):
     with torch.autocast(
         device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
     ):
-        logits = model(xb.to(device))
+        logits, _ = model(xb.to(device))
     loss = loss_fn(logits, yb.to(device))
     cum_loss += loss.item()
 
@@ -119,7 +119,7 @@ for i in range(1, 1 + train_cfg.train_iter):
                 with torch.autocast(
                     device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
                 ):
-                    logits = model(xb.to(device))
+                    logits, _ = model(xb.to(device))
 
                 eval_loss += loss_fn(logits, yb.to(device))
 
@@ -139,7 +139,9 @@ with torch.autocast(
     device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
 ):
     outputs = model.generate(
-        torch.ones((8, 1), dtype=torch.long).to(device), max_new_tokens=10000
+        torch.ones((8, 1), dtype=torch.long).to(device),
+        max_new_tokens=1000,
+        use_kv_cache=True,
     )
 generate_end_time = time.time()
 
@@ -153,5 +155,4 @@ print(
     % (generate_start_time - t0, generate_end_time - generate_start_time)
 )
 
-# for output in outputs:
-#     print(decode(output.view(1).tolist()))
+print(decode(outputs[0].tolist()))
