@@ -107,6 +107,7 @@ for i in range(1, 1 + train_cfg.train_iter):
     optimizer.step()
 
     if i % train_cfg.eval_interval == 0:
+        # todo: attention entropy check, activation check, grdient check, weight check.
         model.eval()
         with torch.no_grad():
             eval_loss = 0
