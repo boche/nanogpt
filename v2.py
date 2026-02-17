@@ -67,6 +67,9 @@ model_cfg = replace(model_cfg, vocab_size=len(chars))
 
 text_indices = torch.tensor(encode(text), dtype=torch.long)
 torch.manual_seed(train_cfg.seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(train_cfg.seed)
+    torch.cuda.manual_seed(train_cfg.seed)
 
 
 model = NanoGPT(model_cfg).to(device)
@@ -87,49 +90,49 @@ optimizer = torch.optim.AdamW(
 torch.cuda.reset_peak_memory_stats(device)
 t0 = time.time()
 
-cum_loss = 0
+# cum_loss = 0
 
-for i in range(1, 1 + train_cfg.train_iter):
-    xb, yb = get_batch(
-        text_indices, "train", train_cfg.batch_size, model_cfg.block_size
-    )
-    optimizer.zero_grad(set_to_none=True)
+# for i in range(1, 1 + train_cfg.train_iter):
+#     xb, yb = get_batch(
+#         text_indices, "train", train_cfg.batch_size, model_cfg.block_size
+#     )
+#     optimizer.zero_grad(set_to_none=True)
 
-    with torch.autocast(
-        device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
-    ):
-        logits, _ = model(xb.to(device))
-    loss = loss_fn(logits, yb.to(device))
-    cum_loss += loss.item()
+#     with torch.autocast(
+#         device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
+#     ):
+#         logits, _ = model(xb.to(device))
+#     loss = loss_fn(logits, yb.to(device))
+#     cum_loss += loss.item()
 
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    optimizer.step()
+#     loss.backward()
+#     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+#     optimizer.step()
 
-    if i % train_cfg.eval_interval == 0:
-        # todo: attention entropy check, activation check, grdient check, weight check.
-        model.eval()
-        with torch.no_grad():
-            eval_loss = 0
-            for j in range(train_cfg.eval_iter):
-                xb, yb = get_batch(
-                    text_indices, "test", train_cfg.batch_size, model_cfg.block_size
-                )
+#     if i % train_cfg.eval_interval == 0:
+#         # todo: attention entropy check, activation check, grdient check, weight check.
+#         model.eval()
+#         with torch.no_grad():
+#             eval_loss = 0
+#             for j in range(train_cfg.eval_iter):
+#                 xb, yb = get_batch(
+#                     text_indices, "test", train_cfg.batch_size, model_cfg.block_size
+#                 )
 
-                with torch.autocast(
-                    device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
-                ):
-                    logits, _ = model(xb.to(device))
+#                 with torch.autocast(
+#                     device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
+#                 ):
+#                     logits, _ = model(xb.to(device))
 
-                eval_loss += loss_fn(logits, yb.to(device))
+#                 eval_loss += loss_fn(logits, yb.to(device))
 
-        print(
-            f"step {i}, train loss {cum_loss/train_cfg.eval_interval: .4f}, eval loss {eval_loss/train_cfg.eval_iter: .4f}, time: {time.time() - t0: .2f} seconds"
-        )
-        cum_loss = 0
-        model.train()
+#         print(
+#             f"step {i}, train loss {cum_loss/train_cfg.eval_interval: .4f}, eval loss {eval_loss/train_cfg.eval_iter: .4f}, time: {time.time() - t0: .2f} seconds"
+#         )
+#         cum_loss = 0
+#         model.train()
 
-torch.save(model.state_dict(), train_cfg.model_path)
+# torch.save(model.state_dict(), train_cfg.model_path)
 model.load_state_dict(torch.load(train_cfg.model_path, map_location=device))
 model.to(device)
 

@@ -1,6 +1,5 @@
 import math
 from dataclasses import dataclass
-import sys
 
 import torch
 from torch import nn
@@ -81,6 +80,7 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x, kv_cache=None):
         B, S, C = x.shape
+        has_cache = kv_cache is not None and len(kv_cache) > 0
 
         if self.use_gqa:
             qkv_prod = self.qkv_head(x)  # B, S, Mixed
@@ -109,23 +109,22 @@ class MultiHeadAttention(nn.Module):
             )  # 3, B, N, S, H
             q, k, v = qkv[0], qkv[1], qkv[2]  # B, N, S, H
 
-        if kv_cache is not None:
-            if len(kv_cache) > 0:
-                k = torch.cat(
-                    (kv_cache[0][:, :, 1 - self.config.block_size :, :], k), dim=2
-                )  # B, N, S, H
-                v = torch.cat(
-                    (kv_cache[1][:, :, 1 - self.config.block_size :, :], v), dim=2
-                )  # B, N, S, H
+        if has_cache:
+            k = torch.cat((kv_cache[0], k), dim=2)[
+                :, :, -self.config.block_size :, :
+            ]  # B, N, S, H
+            v = torch.cat((kv_cache[1], v), dim=2)[
+                :, :, -self.config.block_size :, :
+            ]  # B, N, S, H
 
         if self.config.use_flash_attn:
             dot_product = F.scaled_dot_product_attention(
                 q,
                 k,
                 v,
-                attn_mask=None,
+                attn_mask=None,  # TODO: implement chunk decoding
                 dropout_p=self.config.dropout_ratio if self.training else 0,
-                is_causal=True,
+                is_causal=False if has_cache else True,
                 enable_gqa=self.use_gqa,
             )
         else:
@@ -225,7 +224,7 @@ class NanoGPT(nn.Module):
                 idx[:, -input_seq_len:], past_kv_cache
             )  # logits: B, S, V
             logits = logits[:, -1, :]  # BATCH x VOCAB_SIZE
-            probs = F.softmax(logits, dim=-1)  # BATCH x VOCAB_SIZE
+            probs = F.softmax(logits.float(), dim=-1)  # BATCH x VOCAB_SIZE
             token = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, token), dim=1)  # append to sequence
         return idx
