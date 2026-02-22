@@ -6,12 +6,6 @@ from torch import nn
 import torch.nn.functional as F
 
 
-def loss_fn(logits, target):
-    B, S, C = logits.shape
-    # TODO: implement cross entropy directly
-    return F.cross_entropy(logits.view(B * S, C), target.view(-1))
-
-
 @dataclass(frozen=True)
 class NanoGPTConfig:
     vocab_size: int

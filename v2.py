@@ -2,7 +2,8 @@ from dataclasses import dataclass, replace
 import urllib.request
 import torch
 import time
-from NanoGPT import NanoGPT, NanoGPTConfig, loss_fn
+from NanoGPT import NanoGPT, NanoGPTConfig
+from helper import loss_fn, grad_norm, weight_norm
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -113,7 +114,7 @@ for i in range(1, 1 + train_cfg.train_iter):
     optimizer.step()
 
     if i % train_cfg.eval_interval == 0:
-        # todo: attention entropy check, activation check, grdient check, weight check.
+        # todo: attention entropy check, activation check
         model.eval()
         with torch.no_grad():
             eval_loss = 0
@@ -135,6 +136,9 @@ for i in range(1, 1 + train_cfg.train_iter):
             f"step {i}, train loss {train_loss: .4f}, eval loss {eval_loss: .4f}, time: {time.time() - t0: .2f} seconds"
         )
         writer.add_scalar("train/loss", train_loss, i)
+        writer.add_scalar("train/grad_norm", grad_norm(model), i)
+        writer.add_scalar("train/weight_norm", weight_norm(model), i)
+        writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], i)
         writer.add_scalar("eval/loss", eval_loss, i)
         cum_loss = 0
 
