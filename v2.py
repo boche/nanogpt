@@ -3,6 +3,7 @@ import urllib.request
 import torch
 import time
 from NanoGPT import NanoGPT, NanoGPTConfig, loss_fn
+from torch.utils.tensorboard import SummaryWriter
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class TrainConfig:
         "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/"
         "tinyshakespeare/input.txt"
     )
+    tb_output_path: str = "/mnt/c/Users/aimbo/Code/nanogpt/tb_output/"
 
 
 model_cfg = NanoGPTConfig(
@@ -88,6 +90,9 @@ torch.cuda.reset_peak_memory_stats(device)
 t0 = time.time()
 
 cum_loss = 0
+writer = SummaryWriter(
+    log_dir=train_cfg.tb_output_path + f"nanogpt_{time.strftime('%m%d_%H%M')}"
+)
 
 for i in range(1, 1 + train_cfg.train_iter):
     xb, yb = get_batch(
@@ -124,11 +129,16 @@ for i in range(1, 1 + train_cfg.train_iter):
 
                 eval_loss += loss_fn(logits, yb.to(device))
 
+        train_loss = cum_loss / train_cfg.eval_interval
+        eval_loss = eval_loss / train_cfg.eval_iter
         print(
-            f"step {i}, train loss {cum_loss/train_cfg.eval_interval: .4f}, eval loss {eval_loss/train_cfg.eval_iter: .4f}, time: {time.time() - t0: .2f} seconds"
+            f"step {i}, train loss {train_loss: .4f}, eval loss {eval_loss: .4f}, time: {time.time() - t0: .2f} seconds"
         )
+        writer.add_scalar("train/loss", train_loss, i)
+        writer.add_scalar("eval/loss", eval_loss, i)
         cum_loss = 0
 
+writer.close()
 torch.save(model.state_dict(), train_cfg.model_path)
 model.load_state_dict(torch.load(train_cfg.model_path, map_location=device))
 model.to(device)

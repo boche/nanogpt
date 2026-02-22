@@ -9,6 +9,9 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 
+# tensorboard 
+tb_output/
+
 # macOS
 .DS_Store
 
