@@ -139,6 +139,8 @@ for i in range(1, 1 + train_cfg.train_iter):
         writer.add_scalar("train/grad_norm", grad_norm(model), i)
         writer.add_scalar("train/weight_norm", weight_norm(model), i)
         writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], i)
+        writer.add_scalar("train/activation_first", model.activation_first.item(), i)
+        writer.add_scalar("train/activation_last", model.activation_last.item(), i)
         writer.add_scalar("eval/loss", eval_loss, i)
         cum_loss = 0
 
@@ -167,4 +169,4 @@ print(
     % (generate_start_time - t0, generate_end_time - generate_start_time)
 )
 
-print(decode(outputs[0].tolist()))
+# print(decode(outputs[0].tolist()))

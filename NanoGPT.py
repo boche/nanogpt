@@ -176,6 +176,12 @@ class NanoGPT(nn.Module):
         state = state + pos_emb
         for i in range(self.config.num_layers):
             state = self.decoder_block[i](state)
+
+            if self.training and i == 0:
+                self.activation_first = state.norm(dim=-1).mean()
+            if self.training and i == self.config.num_layers - 1:
+                self.activation_last = state.norm(dim=-1).mean()
+
         return self.lm_head(
             F.rms_norm(state, (state.size(-1),))
         )  # BATCH x SEQ_LEN x VOCAB_SIZE
