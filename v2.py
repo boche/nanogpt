@@ -94,6 +94,7 @@ for i in range(1, 1 + train_cfg.train_iter):
         text_indices, "train", train_cfg.batch_size, model_cfg.block_size
     )
     optimizer.zero_grad(set_to_none=True)
+    model.train()
 
     with torch.autocast(
         device_type="cuda", dtype=torch.bfloat16, enabled=train_cfg.use_bf16
@@ -127,7 +128,6 @@ for i in range(1, 1 + train_cfg.train_iter):
             f"step {i}, train loss {cum_loss/train_cfg.eval_interval: .4f}, eval loss {eval_loss/train_cfg.eval_iter: .4f}, time: {time.time() - t0: .2f} seconds"
         )
         cum_loss = 0
-        model.train()
 
 torch.save(model.state_dict(), train_cfg.model_path)
 model.load_state_dict(torch.load(train_cfg.model_path, map_location=device))
@@ -153,5 +153,4 @@ print(
     % (generate_start_time - t0, generate_end_time - generate_start_time)
 )
 
-# for output in outputs:
-#     print(decode(output.view(1).tolist()))
+print(decode(outputs[0].tolist()))

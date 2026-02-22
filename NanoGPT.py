@@ -49,12 +49,10 @@ class NanoGPTConfig:
 
 
 class MultiHeadAttention(nn.Module):
-    # add local parameters: block_size
     def __init__(self, config: NanoGPTConfig):
         super().__init__()
         self.config = config
         self.use_gqa = (config.group_size > 1) and config.use_flash_attn
-        self.head_size = config.emb_size // config.num_heads
 
         if self.use_gqa:
             self.qkv_head = nn.Linear(
@@ -180,7 +178,7 @@ class NanoGPT(nn.Module):
             torch.arange(S, device=input.device)
         ).unsqueeze(
             0
-        )  # 1, S, E
+        )  # 1, S, C
         state = state + pos_emb
         for i in range(self.config.num_layers):
             state = self.decoder_block[i](state)
@@ -190,7 +188,7 @@ class NanoGPT(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens):
-        for i in range(max_new_tokens):
+        for _ in range(max_new_tokens):
             logits = self(idx[:, -self.config.block_size :])  # logits: B, S, V
             logits = logits[:, -1, :]  # BATCH x VOCAB_SIZE
             probs = F.softmax(logits, dim=-1)  # BATCH x VOCAB_SIZE
