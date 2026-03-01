@@ -50,11 +50,10 @@ def get_batch(text, split, batch_size, block_size):
     data = train if split == "train" else val
 
     ix = torch.randint(len(data) - block_size - 1, (batch_size,))
-    # TODO: implement this more natively in matrix
-    xb = torch.stack([data[i : i + block_size] for i in ix])
-    yb = torch.stack([data[i + 1 : i + 1 + block_size] for i in ix])  # b * seq_len
+    offset = torch.arange(block_size)
+    pos = ix[:, None] + offset[None, :]
 
-    return xb, yb
+    return data[pos], data[pos + 1]
 
 
 train_cfg = TrainConfig()
